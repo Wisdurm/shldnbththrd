@@ -1,8 +1,3 @@
-#include "SDL3/SDL_stdinc.h"
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <numeric>
 #define SDL_MAIN_USE_CALLBACKS 1
 #include "SDL3/SDL_error.h"
 #include "SDL3/SDL_iostream.h"
@@ -30,6 +25,10 @@
 #include <string>
 #include <optional>
 #include <cmath>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <numeric>
 
 enum class Mode
 {
@@ -42,6 +41,7 @@ enum class Mode
 enum class LineType
 {
 	LINE,
+	STICK,
 	CIRCLE,
 };
 
@@ -50,13 +50,15 @@ struct RPoint;
 using DrawnLine = std::pair<std::shared_ptr<RPoint>, LineType>;
 using Line = std::pair<const RPoint*, const RPoint*>;
 
+// Hashing for Line (stack overflow)
 namespace std {
-template <> struct hash<std::pair<const RPoint*, const RPoint*>> {
-    inline size_t operator()(const std::pair<const RPoint*, const RPoint*> &v) const {
-        std::hash<const RPoint*> ptr_hasher;
-        return ptr_hasher(v.first) ^ ptr_hasher(v.second);
-    }
-};
+	template <> struct hash<std::pair<const RPoint*, const RPoint*>> {
+		inline size_t operator()
+		(const std::pair<const RPoint*, const RPoint*> &v) const {
+			std::hash<const RPoint*> ptr_hasher;
+			return ptr_hasher(v.first) ^ ptr_hasher(v.second);
+		}
+	};
 }
 
 struct RPoint
@@ -122,6 +124,8 @@ struct Frame {
 	Frame (Frame&& other) = delete;
 };
 
+// Constant data
+
 static const std::unordered_map<Mode, std::string> modeNames = {
 	{ Mode::SELECT,	"Select"},
 	{ Mode::ADD,	"Add"},
@@ -132,7 +136,12 @@ static const std::unordered_map<Mode, std::string> modeNames = {
 static const std::unordered_map<LineType, std::string> lineNames = {
 	{ LineType::LINE,	"lines"},
 	{ LineType::CIRCLE,	"circles"},
+	{ LineType::STICK,	"sticks"},
 };
+
+constexpr float CAP_SIZE = 10;
+
+// Functions
 
 void drawLine(const RPoint* p);
 void ExportAnimation();
@@ -154,6 +163,7 @@ static std::vector<std::unique_ptr<Frame>> frames;
 static unsigned frame = 0;
 static SDL_FPoint mouse;
 static SDL_Texture* circleTexture = nullptr;
+static SDL_Texture* stickTexture = nullptr;
 
 /// Mode data (if haskell could be in type :( sad)
 
@@ -163,7 +173,7 @@ static std::unordered_set<RPoint*> selectedPoints;
 // ADD
 static std::optional<SDL_FPoint> firstPoint;
 static std::shared_ptr<RPoint> selectedPoint;
-static LineType lineType;
+static LineType lineType = LineType::STICK;
 
 // ROTATE
 static const RPoint* pivot;
@@ -182,10 +192,13 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 
 	const std::string circleSVG =
 		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10mm\" height=\"10mm\" viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"5\" style=\"fill:#ffffff;stroke-width:.417999;stroke-linecap:round;stroke-linejoin:round;fill-opacity:1\"/></svg>";
-	const std::string moi =
-		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10mm\" height=\"10mm\" viewBox=\"0 0 10 10\"><path d=\"M-10.068 3.92h8.518v1.84h-8.518z\" style=\"fill:#000;stroke-width:.560049;stroke-linecap:round;stroke-linejoin:round\" transform=\"rotate(-90)\"/><path d=\"m2.228 3.301 5.312.075L4.958.126Z\" style=\"fill:#000;stroke-width:.560049;stroke-linecap:round;stroke-linejoin:round\"/></svg>";
+	const std::string stickSVG =
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2mm\" height=\"5mm\" viewBox=\"0 0 2 5\"><path d=\"M0 0h2v5H0z\" style=\"fill:#fff;stroke:none;stroke-width:.699269;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1\"/></svg>";
+	// const std::string arrow =
+	// 	"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10mm\" height=\"10mm\" viewBox=\"0 0 10 10\"><path d=\"M-10.068 3.92h8.518v1.84h-8.518z\" style=\"fill:#000;stroke-width:.560049;stroke-linecap:round;stroke-linejoin:round\" transform=\"rotate(-90)\"/><path d=\"m2.228 3.301 5.312.075L4.958.126Z\" style=\"fill:#000;stroke-width:.560049;stroke-linecap:round;stroke-linejoin:round\"/></svg>";
 
 	LoadSVG(circleTexture, circleSVG, 500, 500);
+	LoadSVG(stickTexture, stickSVG, 200, 500);
 
 	const std::vector<std::shared_ptr<RPoint>> empty = {};
 	frames.push_back(std::make_unique<Frame>(	empty));
@@ -241,10 +254,13 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 				mode = Mode::ROTATE;
 			break;
 		case SDLK_Z:
-			lineType = LineType::LINE;
+			lineType = LineType::STICK;
 			break;
 		case SDLK_X:
 			lineType = LineType::CIRCLE;
+			break;
+		case SDLK_C:
+			lineType = LineType::LINE;
 			break;
 		case SDLK_A: {
 			if (mode == Mode::SELECT) {
@@ -258,6 +274,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 			frame = std::max(static_cast<int>(frame-1), 0);
 			selectedPoints.clear();
 			selectedPoint = nullptr;
+			pivot = nullptr;
 			break;
 		}
 		case SDLK_E: {
@@ -270,6 +287,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 			}
 			selectedPoints.clear();
 			selectedPoint = nullptr;
+			pivot = nullptr;
 			break;
 		}
 		case SDLK_D: {
@@ -442,7 +460,8 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 	size_t sum = 0;
 	{
 		std::unordered_set<RPoint*> visited;
-		for (const auto& p : frames.at(frame)->points) {
+		for (const auto& p :
+			     frames.at(frame)->points) {
 			sum += countLines(p.get(), visited);
 		}
 	}
@@ -459,20 +478,24 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 	// Onion skins
 	for (int i = std::max(static_cast<int>(frame - 3), 0);
 	     i < frame; i++) {
-		const uint8_t a = (3-(i - frame))*70;
+		const uint8_t a = (i - frame)*70;
 		SDL_SetRenderDrawColor(renderer, 170, 100, 0, a);
-		SDL_SetTextureColorMod(circleTexture, 0, 100, 170);
+		SDL_SetTextureColorMod(circleTexture, 0, 170, 100);
 		SDL_SetTextureAlphaMod(circleTexture, a);
+		SDL_SetTextureColorMod(stickTexture, 0, 170, 100);
+		SDL_SetTextureAlphaMod(stickTexture, a);
 		for (auto const& point : frames.at(i)->points)
 			drawLine(point.get());
 	}
 	for (int i = std::min(static_cast<int>(frame + 3),
 			      static_cast<int>(frames.size()) - 1);
 	     i > frame; i--) {
-		const uint8_t a = (3-(i - frame))*70;
+		const uint8_t a = (4-(i - frame))*70;
 		SDL_SetRenderDrawColor(renderer, 0, 100, 170, a);
 		SDL_SetTextureColorMod(circleTexture, 0, 100, 170);
 		SDL_SetTextureAlphaMod(circleTexture, a);
+		SDL_SetTextureColorMod(stickTexture, 0, 100, 170);
+		SDL_SetTextureAlphaMod(stickTexture, a);
 		for (auto const& point : frames.at(i)->points)
 			drawLine(point.get());
 	}
@@ -480,6 +503,8 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_SetTextureColorMod(circleTexture, 0, 0, 0);
 	SDL_SetTextureAlphaMod(circleTexture, 255);
+	SDL_SetTextureColorMod(stickTexture, 0, 0, 0);
+	SDL_SetTextureAlphaMod(stickTexture, 255);
 	for (auto const& point : frames.at(frame)->points)
 		drawLine(point.get());
 
@@ -487,20 +512,27 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 	SDL_SetRenderDrawColor(renderer, 255, 0, 0, 100);
 	for (const auto& p : selectedPoints) {
 		const SDL_FRect rect = {
-			p->p.x - 25, p->p.y - 25,
-			50, 50
+			p->p.x - ((CAP_SIZE + 10) / 2),
+			p->p.y - ((CAP_SIZE + 10) / 2),
+			CAP_SIZE + 10, CAP_SIZE + 10
 		};
-		SDL_RenderFillRect(renderer, &rect);
+		SDL_SetTextureColorMod(circleTexture, 255, 0, 0);
+		SDL_SetTextureAlphaMod(circleTexture, 150);
+		SDL_RenderTexture(renderer, circleTexture,
+				  nullptr, &rect);
+
 	}
 	if (pivot) {
-		SDL_SetRenderDrawColor(renderer, 170, 100, 0, 100);
+		SDL_SetTextureColorMod(circleTexture, 170, 100, 0);
+		SDL_SetTextureAlphaMod(circleTexture, 150);
 		const SDL_FRect rect = {
-			pivot->p.x - 25, pivot->p.y - 25,
-			50, 50
+			pivot->p.x - ((CAP_SIZE + 20) / 2),
+			pivot->p.y - ((CAP_SIZE + 20) / 2),
+			CAP_SIZE + 20, CAP_SIZE + 20
 		};
-		SDL_RenderFillRect(renderer, &rect);
+		SDL_RenderTexture(renderer, circleTexture,
+				  nullptr, &rect);
 	}
-
 	SDL_RenderPresent(renderer);
 	return SDL_APP_CONTINUE;
 }
@@ -543,6 +575,66 @@ void drawLine_(const RPoint* p, std::unordered_set<Line>& visited)
 						 nullptr, &dstrect,
 						 rangle, &center,
 						 SDL_FLIP_NONE);
+			break;
+		}
+		case LineType::STICK: {
+			const float w = c->p.x - p->p.x;
+			const float h = p->p.y - c->p.y;
+			const float hyp = std::sqrt(std::pow(h, 2)
+						    + std::pow(w, 2));
+			const double angle = std::asin(h/hyp);
+			const double rangle = (w < 0) ? (angle-(M_PI/2))
+				: (-angle+(M_PI/2));
+			const double deg = rangle * (180/M_PI);
+
+			// Stick
+			{
+				constexpr SDL_FRect srcrect = {
+					0,100, 200, 300
+				};
+				const SDL_FRect dstrect = {
+					p->p.x - (CAP_SIZE/2),
+					p->p.y-hyp,
+					CAP_SIZE, hyp
+				};
+				const SDL_FPoint center = {
+					dstrect.w / 2,
+					dstrect.h
+				};
+				SDL_RenderTextureRotated(renderer,
+							 stickTexture,
+							 &srcrect,
+							 &dstrect,
+							 deg, &center,
+							 SDL_FLIP_NONE);
+			}
+			// Caps
+			{
+				const SDL_FRect dstrect = {
+					p->p.x - CAP_SIZE / 2,
+					p->p.y - CAP_SIZE / 2,
+					CAP_SIZE, CAP_SIZE
+				};
+				SDL_RenderTexture(renderer,
+						  circleTexture,
+						  nullptr,
+						  &dstrect);
+			}
+			{
+				const float destX = p->p.x +
+					(std::cos(rangle-(M_PI/2))*hyp);
+				const float destY = p->p.y +
+					(std::sin(rangle-(M_PI/2))*hyp);
+				const SDL_FRect dstrect = {
+					destX - CAP_SIZE / 2,
+					destY - CAP_SIZE / 2,
+					CAP_SIZE, CAP_SIZE
+				};
+				SDL_RenderTexture(renderer,
+						  circleTexture,
+						  nullptr,
+						  &dstrect);
+			}
 			break;
 		}
 		}

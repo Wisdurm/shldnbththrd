@@ -22,9 +22,10 @@ Done:
 - Delete lines
 - Delete frames
 - Circles
+- Thick lines
 
 Todo:
+- Better pivot markers
 - Undo (?)
 - Cycle selection (??)
-- Thick lines
 - Slightly better ui (egads!!)
