@@ -1,6 +1,13 @@
+#include "SDL3/SDL_stdinc.h"
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <numeric>
+#define SDL_MAIN_USE_CALLBACKS 1
+#include "SDL3/SDL_error.h"
+#include "SDL3/SDL_iostream.h"
 #include "SDL3/SDL_pixels.h"
 #include <SDL3/SDL_surface.h>
-#define SDL_MAIN_USE_CALLBACKS 1
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_assert.h>
@@ -15,7 +22,6 @@
 
 #include <SDL3_image/SDL_image.h>
 
-#include <deque>
 #include <unordered_map>
 #include <unordered_set>
 #include <map>
@@ -25,15 +31,43 @@
 #include <optional>
 #include <cmath>
 
+enum class Mode
+{
+	SELECT,
+	ADD,
+	MOVE,
+	ROTATE,
+};
+
+enum class LineType
+{
+	LINE,
+	CIRCLE,
+};
+
+struct RPoint;
+
+using DrawnLine = std::pair<std::shared_ptr<RPoint>, LineType>;
+using Line = std::pair<const RPoint*, const RPoint*>;
+
+namespace std {
+template <> struct hash<std::pair<const RPoint*, const RPoint*>> {
+    inline size_t operator()(const std::pair<const RPoint*, const RPoint*> &v) const {
+        std::hash<const RPoint*> ptr_hasher;
+        return ptr_hasher(v.first) ^ ptr_hasher(v.second);
+    }
+};
+}
+
 struct RPoint
 {
-	std::deque<std::shared_ptr<RPoint>> c;
+	std::vector<DrawnLine> c;
 	SDL_FPoint p;
 	RPoint* parent;
 
 	RPoint() : c({}), p({0,0}), parent(nullptr) {};
 
-	RPoint(std::deque<std::shared_ptr<RPoint>> c,
+	RPoint(std::vector<DrawnLine> c,
 	       SDL_FPoint p, RPoint* parent) : c(c), p(p), parent(parent) {};
 
 	// Copy point and all children
@@ -52,16 +86,18 @@ struct RPoint
 			point->parent = nullptr;
 
 			// Copy children
-			for (const auto p : target.c) {
+			for (const auto [p, lt] :
+				     target.c) {
 				if (map.contains(p.get())) {
-					point->c.push_back(map.at(p.get()));
+					point->c.push_back(
+						{map.at(p.get()),lt});
 				} else {
 					auto neww =
 						std::make_shared<RPoint>();
-					cp(neww.get(), *p);
 					map.insert({p.get(), neww});
-					point->c.push_back(neww);
-					point->c.back()->parent = point;
+					cp(neww.get(), *p);
+					point->c.push_back({neww,lt});
+					point->c.back().first->parent = point;
 				}
 			}
 		};
@@ -71,25 +107,10 @@ struct RPoint
 	RPoint (RPoint&& other) = delete;
 };
 
-enum class Mode
-{
-	SELECT,
-	ADD,
-	MOVE,
-	ROTATE,
-};
-
-static std::unordered_map<Mode, std::string> modeNames = {
-	{ Mode::SELECT,	"Select"},
-	{ Mode::ADD,	"Add"},
-	{ Mode::MOVE,	"Move"},
-	{ Mode::ROTATE,	"Rotate"},
-};
-
 struct Frame {
-	std::deque<std::shared_ptr<RPoint>> points;
+	std::vector<std::shared_ptr<RPoint>> points;
 
-	Frame(std::deque<std::shared_ptr<RPoint>> points) : points(points) {}
+	Frame(std::vector<std::shared_ptr<RPoint>> points) : points(points) {}
 	Frame(const Frame &obj) : points({})
 	{
 		// Copy points
@@ -101,8 +122,22 @@ struct Frame {
 	Frame (Frame&& other) = delete;
 };
 
-void drawLine(const RPoint& p);
+static const std::unordered_map<Mode, std::string> modeNames = {
+	{ Mode::SELECT,	"Select"},
+	{ Mode::ADD,	"Add"},
+	{ Mode::MOVE,	"Move"},
+	{ Mode::ROTATE,	"Rotate"},
+};
+
+static const std::unordered_map<LineType, std::string> lineNames = {
+	{ LineType::LINE,	"lines"},
+	{ LineType::CIRCLE,	"circles"},
+};
+
+void drawLine(const RPoint* p);
 void ExportAnimation();
+void LoadSVG(SDL_Texture*& dst, const std::string& svg, int w, int h);
+size_t countLines(RPoint* p, std::unordered_set<RPoint*>& visited);
 constexpr float Distance(SDL_FPoint p1, SDL_FPoint p2);
 
 // SDL
@@ -113,9 +148,12 @@ static SDL_Renderer *renderer = NULL;
 // Program
 
 static Mode mode = Mode::SELECT;
+// Could use list but I don't how to store references
+// to a particular position sooooo vector it is
 static std::vector<std::unique_ptr<Frame>> frames;
 static unsigned frame = 0;
 static SDL_FPoint mouse;
+static SDL_Texture* circleTexture = nullptr;
 
 /// Mode data (if haskell could be in type :( sad)
 
@@ -125,6 +163,7 @@ static std::unordered_set<RPoint*> selectedPoints;
 // ADD
 static std::optional<SDL_FPoint> firstPoint;
 static std::shared_ptr<RPoint> selectedPoint;
+static LineType lineType;
 
 // ROTATE
 static const RPoint* pivot;
@@ -138,10 +177,20 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
 	}
-	const std::deque<std::shared_ptr<RPoint>> empty = {};
-	frames.push_back(std::make_unique<Frame>(empty));
 	SDL_SetRenderVSync(renderer, 1);
 	SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
+	const std::string circleSVG =
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10mm\" height=\"10mm\" viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"5\" style=\"fill:#ffffff;stroke-width:.417999;stroke-linecap:round;stroke-linejoin:round;fill-opacity:1\"/></svg>";
+	const std::string moi =
+		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10mm\" height=\"10mm\" viewBox=\"0 0 10 10\"><path d=\"M-10.068 3.92h8.518v1.84h-8.518z\" style=\"fill:#000;stroke-width:.560049;stroke-linecap:round;stroke-linejoin:round\" transform=\"rotate(-90)\"/><path d=\"m2.228 3.301 5.312.075L4.958.126Z\" style=\"fill:#000;stroke-width:.560049;stroke-linecap:round;stroke-linejoin:round\"/></svg>";
+
+	LoadSVG(circleTexture, circleSVG, 500, 500);
+
+	const std::vector<std::shared_ptr<RPoint>> empty = {};
+	frames.push_back(std::make_unique<Frame>(	empty));
+
+
 	return SDL_APP_CONTINUE;
 }
 
@@ -154,8 +203,9 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 		-> void {
 		if (visited.contains(p.get()))
 			return;
+		visited.insert(p.get());
 		distances.insert({Distance(p->p, mouse), p});
-		for (auto& c : p->c)
+		for (auto& [c, _] : p->c)
 			self(distances, visited, c);
 	};
 
@@ -165,8 +215,9 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 		-> void {
 		if (visited.contains(p))
 			return;
+		visited.insert(p);
 		selectedPoints.insert(p);
-		for (auto& c : p->c)
+		for (auto& [c, _] : p->c)
 			self(visited, c.get());
 	};
 
@@ -188,6 +239,12 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 		case SDLK_4:
 			if (pivot)
 				mode = Mode::ROTATE;
+			break;
+		case SDLK_Z:
+			lineType = LineType::LINE;
+			break;
+		case SDLK_X:
+			lineType = LineType::CIRCLE;
 			break;
 		case SDLK_A: {
 			if (mode == Mode::SELECT) {
@@ -222,7 +279,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 					if (auto par = p->parent) {
 						for (auto it = par->c.begin();
 						     it != par->c.end(); it++)
-							if (it->get() == p) {
+							if (it->first.get() == p) {
 								par->c.erase(
 									it);
 								break;
@@ -239,6 +296,15 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 					}
 				}
 				selectedPoints.clear();
+			}
+			break;
+		}
+		case SDLK_K: {
+			if (frames.size() == 1) {
+				frames.at(frame)->points.clear();
+			} else {
+				frames.erase(frames.begin() + frame);
+				frame = std::max(static_cast<int>(frame - 1), 0);
 			}
 			break;
 		}
@@ -306,33 +372,35 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 			for (auto& point: frames.at(frame)->points)
 				selectPoint(distances, emptyVisited,
 					    point);
-			const std::deque<std::shared_ptr<RPoint>> noChildren = {};
+			const std::vector<DrawnLine> noChildren = {};
 
 			if (distances.begin() != distances.end() &&
 			    distances.begin()->first < 25) {
 				if (firstPoint) {
-					distances.begin()->second->c.push_back(
-						std::make_shared<RPoint>(
-						noChildren, firstPoint.value(),
-						distances.begin()->second.get()
-						));
+					distances.begin()->second->c.push_back({
+							std::make_shared<RPoint>(
+								noChildren,
+								firstPoint.value(),
+								distances.begin()->
+								second.get()
+								), lineType});
 
 					selectedPoint = nullptr;
 					firstPoint = std::nullopt;
 				} else if (selectedPoint) {
 					distances.begin()->second->c.push_back(
-						selectedPoint
-						);
+						{selectedPoint, lineType});
 					selectedPoint = nullptr;
 				} else
 					selectedPoint = distances.begin()->second;
 
 			} else {
 				if (firstPoint) {
-					const std::deque<std::shared_ptr<RPoint>> c = {
-						std::make_shared<RPoint>(
-							noChildren,
-							mouse, nullptr)};
+					const std::vector<DrawnLine> c
+						= { {std::make_shared<RPoint>(
+								noChildren,
+								mouse, nullptr),
+							     lineType}};
 
 					frames.at(frame)->points.push_back(
 						std::make_shared<RPoint>(
@@ -342,11 +410,12 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 					selectedPoint = nullptr;
 					firstPoint = std::nullopt;
 				} else if (selectedPoint) {
-					selectedPoint->c.push_back(
-						std::make_shared<RPoint>(
-							noChildren,
-							mouse,
-							selectedPoint.get()));
+					selectedPoint->c.push_back({
+							std::make_shared<RPoint>(
+								noChildren,
+								mouse,
+								selectedPoint.get()),
+							lineType});
 					selectedPoint = nullptr;
 				} else
 					firstPoint = mouse;
@@ -370,35 +439,49 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
 	// Mode line
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+	size_t sum = 0;
+	{
+		std::unordered_set<RPoint*> visited;
+		for (const auto& p : frames.at(frame)->points) {
+			sum += countLines(p.get(), visited);
+		}
+	}
 	SDL_RenderDebugTextFormat(renderer, 0, 0,
-				  "%s mode - Frame: %d / %zu",
+				  "%s mode - Drawing %s - Frame: %d / %zu"
+				  " - Lines: %zu",
 				  modeNames.at(mode).c_str(),
+				  lineNames.at(lineType).c_str(),
 				  frame,
-				  frames.size() - 1
+				  frames.size() - 1,
+				  sum
 		);
 
 	// Onion skins
 	for (int i = std::max(static_cast<int>(frame - 3), 0);
 	     i < frame; i++) {
-		SDL_SetRenderDrawColor(renderer, 170, 100, 0,
-				       (3-(frame - i))*70
-			);
+		const uint8_t a = (3-(i - frame))*70;
+		SDL_SetRenderDrawColor(renderer, 170, 100, 0, a);
+		SDL_SetTextureColorMod(circleTexture, 0, 100, 170);
+		SDL_SetTextureAlphaMod(circleTexture, a);
 		for (auto const& point : frames.at(i)->points)
-			drawLine(*point);
+			drawLine(point.get());
 	}
 	for (int i = std::min(static_cast<int>(frame + 3),
 			      static_cast<int>(frames.size()) - 1);
 	     i > frame; i--) {
-		SDL_SetRenderDrawColor(renderer, 0, 100, 170,
-				       (3-(i - frame))*70
-			);
+		const uint8_t a = (3-(i - frame))*70;
+		SDL_SetRenderDrawColor(renderer, 0, 100, 170, a);
+		SDL_SetTextureColorMod(circleTexture, 0, 100, 170);
+		SDL_SetTextureAlphaMod(circleTexture, a);
 		for (auto const& point : frames.at(i)->points)
-			drawLine(*point);
+			drawLine(point.get());
 	}
 	// Actual frame
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+	SDL_SetTextureColorMod(circleTexture, 0, 0, 0);
+	SDL_SetTextureAlphaMod(circleTexture, 255);
 	for (auto const& point : frames.at(frame)->points)
-		drawLine(*point);
+		drawLine(point.get());
 
 	// Selected
 	SDL_SetRenderDrawColor(renderer, 255, 0, 0, 100);
@@ -425,14 +508,53 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 void SDL_AppQuit(void *appstate, SDL_AppResult result)
 {}
 
-void drawLine(const RPoint& p) {
-	for (auto& c : p.c) {
-		SDL_RenderLine(renderer,
-			       p.p.x, p.p.y,
-			       c->p.x, c->p.y);
-		drawLine(*c);
+void drawLine_(const RPoint* p, std::unordered_set<Line>& visited)
+{
+	for (auto& [c, lt] : p->c) {
+		const Line pair = {p, c.get()};
+		if (visited.contains(pair))
+			continue;
+		visited.insert(pair);
+
+		switch (lt)
+		{
+		case LineType::LINE:
+			SDL_RenderLine(renderer,
+				       p->p.x, p->p.y,
+				       c->p.x, c->p.y);
+			break;
+		case LineType::CIRCLE: {
+			// 7th grade level maths :shout: :fire:
+			const float w = c->p.x - p->p.x;
+			const float h = p->p.y - c->p.y;
+			const float hyp = std::sqrt(std::pow(h, 2)
+						    + std::pow(w, 2));
+			const SDL_FRect dstrect = {
+				p->p.x - (hyp/2), p->p.y-hyp,
+				hyp, hyp
+			};
+
+			const double angle = std::asin(h/hyp) * (180/M_PI);
+			const double rangle = (w < 0) ? (angle-90)
+				: (-angle+90);
+			const SDL_FPoint center = {dstrect.w/2,dstrect.h};
+
+			SDL_RenderTextureRotated(renderer, circleTexture,
+						 nullptr, &dstrect,
+						 rangle, &center,
+						 SDL_FLIP_NONE);
+			break;
+		}
+		}
+		drawLine_(c.get(), visited);
 	}
 };
+
+void drawLine(const RPoint* p)
+{
+	std::unordered_set<Line> visited;
+	drawLine_(p, visited);
+}
 
 void ExportAnimation()
 {
@@ -443,9 +565,9 @@ void ExportAnimation()
 
 	// Init temporary buffer
 	SDL_Texture* temp = SDL_CreateTexture(renderer,
-					   SDL_PIXELFORMAT_RGBA8888,
-					   SDL_TEXTUREACCESS_TARGET,
-					   800, 600);
+					      SDL_PIXELFORMAT_RGBA8888,
+					      SDL_TEXTUREACCESS_TARGET,
+					      800, 600);
 	SDL_SetRenderTarget(renderer, temp);
 
 	// Draw frames
@@ -455,7 +577,7 @@ void ExportAnimation()
 		SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 
 		for (auto const& point : f->points)
-			drawLine(*point);
+			drawLine(point.get());
 		renderedFrames.push_back(SDL_RenderReadPixels(renderer, NULL));
 	}
 	SDL_DestroyTexture(temp);
@@ -473,6 +595,26 @@ void ExportAnimation()
 	// Cleanup
 	for (auto& s : renderedFrames)
 		SDL_DestroySurface(s);
+}
+
+void LoadSVG(SDL_Texture*& dst, const std::string& svg, int w, int h)
+{
+	SDL_IOStream* io = SDL_IOFromConstMem(svg.data(), svg.size());
+	SDL_Surface* tmp = IMG_LoadSizedSVG_IO(io, w, h);
+	dst = SDL_CreateTextureFromSurface(renderer, tmp);
+	SDL_DestroySurface(tmp);
+}
+
+size_t countLines(RPoint* p, std::unordered_set<RPoint*>& visited)
+{
+	if (visited.contains(p))
+		return 1;
+	visited.insert(p);
+	std::vector<size_t> sizes;
+	for (const auto& c : p->c) {
+		sizes.push_back(countLines(c.first.get(), visited));
+	}
+	return std::accumulate(sizes.begin(), sizes.end(), 1);
 }
 
 constexpr float Distance(SDL_FPoint p1, SDL_FPoint p2)

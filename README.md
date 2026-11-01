@@ -20,11 +20,11 @@ Done:
 - Better selection
 - Connect lines at end
 - Delete lines
+- Delete frames
+- Circles
 
 Todo:
-- Delete frames
 - Undo (?)
-- Cycle selection
-- Circles (?)
+- Cycle selection (??)
 - Thick lines
-- Slightly better ui
+- Slightly better ui (egads!!)
