@@ -25,15 +25,50 @@
 #include <optional>
 #include <cmath>
 
-
-static SDL_Window *window = NULL;
-static SDL_Renderer *renderer = NULL;
-
 struct RPoint
 {
-	std::deque<RPoint> c;
+	std::deque<std::shared_ptr<RPoint>> c;
 	SDL_FPoint p;
 	RPoint* parent;
+
+	RPoint() : c({}), p({0,0}), parent(nullptr) {};
+
+	RPoint(std::deque<std::shared_ptr<RPoint>> c,
+	       SDL_FPoint p, RPoint* parent) : c(c), p(p), parent(parent) {};
+
+	// Copy point and all children
+	RPoint(const RPoint &obj)
+	{
+		// Map old pointers to new ones to resolve cyclical structures
+		std::unordered_map<RPoint*, std::shared_ptr<RPoint>> map;
+
+		const auto cp = [&map]
+			(this const auto& cp,
+			 RPoint* point, const RPoint &target) -> void {
+
+			// Copy old values into new one
+			point->c = {};
+			point->p = target.p;
+			point->parent = nullptr;
+
+			// Copy children
+			for (const auto p : target.c) {
+				if (map.contains(p.get())) {
+					point->c.push_back(map.at(p.get()));
+				} else {
+					auto neww =
+						std::make_shared<RPoint>();
+					cp(neww.get(), *p);
+					map.insert({p.get(), neww});
+					point->c.push_back(neww);
+					point->c.back()->parent = point;
+				}
+			}
+		};
+		cp(this, obj);
+	}
+	// Probably not needed?
+	RPoint (RPoint&& other) = delete;
 };
 
 enum class Mode
@@ -51,15 +86,35 @@ static std::unordered_map<Mode, std::string> modeNames = {
 	{ Mode::ROTATE,	"Rotate"},
 };
 
-using Frame = std::deque<RPoint>;
+struct Frame {
+	std::deque<std::shared_ptr<RPoint>> points;
+
+	Frame(std::deque<std::shared_ptr<RPoint>> points) : points(points) {}
+	Frame(const Frame &obj) : points({})
+	{
+		// Copy points
+		for (const auto p : obj.points) {
+			points.push_back(std::make_shared<RPoint>(*p));
+		}
+	}
+	// Never move
+	Frame (Frame&& other) = delete;
+};
 
 void drawLine(const RPoint& p);
 void ExportAnimation();
 constexpr float Distance(SDL_FPoint p1, SDL_FPoint p2);
 
+// SDL
+
+static SDL_Window *window = NULL;
+static SDL_Renderer *renderer = NULL;
+
+// Program
+
 static Mode mode = Mode::SELECT;
 static std::vector<std::unique_ptr<Frame>> frames;
-static int frame = 0;
+static unsigned frame = 0;
 static SDL_FPoint mouse;
 
 /// Mode data (if haskell could be in type :( sad)
@@ -69,7 +124,7 @@ static std::unordered_set<RPoint*> selectedPoints;
 
 // ADD
 static std::optional<SDL_FPoint> firstPoint;
-static RPoint* selectedPoint;
+static std::shared_ptr<RPoint> selectedPoint;
 
 // ROTATE
 static const RPoint* pivot;
@@ -83,7 +138,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
 	}
-	frames.push_back(std::make_unique<Frame>());
+	const std::deque<std::shared_ptr<RPoint>> empty = {};
+	frames.push_back(std::make_unique<Frame>(empty));
 	SDL_SetRenderVSync(renderer, 1);
 	SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 	return SDL_APP_CONTINUE;
@@ -93,19 +149,25 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 {
 	constexpr auto selectPoint = [&]
 		(this const auto &self,
-		 std::multimap<int, RPoint*>& distances,
-		 RPoint& p) -> void {
-		distances.insert({Distance(p.p, mouse), &p});
-		for (auto& c : p.c)
-			self(distances, c);
+		 std::multimap<int, std::shared_ptr<RPoint>>& distances,
+		 std::unordered_set<RPoint*>& visited, std::shared_ptr<RPoint> p)
+		-> void {
+		if (visited.contains(p.get()))
+			return;
+		distances.insert({Distance(p->p, mouse), p});
+		for (auto& c : p->c)
+			self(distances, visited, c);
 	};
 
 	constexpr auto selectAll = [&]
-		(this const auto &self, RPoint* p)
+		(this const auto &self,
+		 std::unordered_set<RPoint*>& visited, RPoint* p)
 		-> void {
+		if (visited.contains(p))
+			return;
 		selectedPoints.insert(p);
 		for (auto& c : p->c)
-			self(&c);
+			self(visited, c.get());
 	};
 
 	if (event->type == SDL_EVENT_KEY_DOWN) {
@@ -129,21 +191,28 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 			break;
 		case SDLK_A: {
 			if (mode == Mode::SELECT) {
+				std::unordered_set<RPoint*> emptyVisited;
 				for (auto p : selectedPoints)
-					selectAll(p);
+					selectAll(emptyVisited, p);
 			}
 			break;
 		}
 		case SDLK_Q: {
-			frame = std::max(frame-1, 0);
+			frame = std::max(static_cast<int>(frame-1), 0);
+			selectedPoints.clear();
+			selectedPoint = nullptr;
 			break;
 		}
 		case SDLK_E: {
 			frame++;
 			if (frame == frames.size()) {
-				Frame nFrame = *frames.back();
-				frames.push_back(std::make_unique<Frame>(nFrame));
+				const Frame nFrame = *frames.back();
+				// Copy
+				frames.push_back(
+					std::make_unique<Frame>(nFrame));
 			}
+			selectedPoints.clear();
+			selectedPoint = nullptr;
 			break;
 		}
 		case SDLK_D: {
@@ -151,9 +220,25 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 				// Probably safe because unordered_sets are unordered?
 				for (auto& p : selectedPoints) {
 					if (auto par = p->parent) {
+						for (auto it = par->c.begin();
+						     it != par->c.end(); it++)
+							if (it->get() == p) {
+								par->c.erase(
+									it);
+								break;
+							}
 					} else {
+						auto& f = frames.at(frame)
+							->points;
+						for (auto it = f.begin();
+						     it != f.end(); it++)
+							if (it->get() == p) {
+								f.erase(it);
+								break;
+							}
 					}
 				}
+				selectedPoints.clear();
 			}
 			break;
 		}
@@ -193,20 +278,22 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 		switch (mode)
 		{
 		case Mode::SELECT: {
-			std::multimap<int, RPoint*> distances;
-			for (auto& point: *frames.at(frame)) {
-				selectPoint(distances, point);
-			}
+			std::unordered_set<RPoint*> emptyVisited;
+			std::multimap<int, std::shared_ptr<RPoint>> distances;
+			for (auto& point: frames.at(frame)->points)
+				selectPoint(distances, emptyVisited,
+					    point);
 			for (auto it = distances.begin();
 			     it != distances.end(); it++) {
 				if (it->first < 25) {
 					if (event->button.button == SDL_BUTTON_LEFT) {
 						if (selectedPoints
-						    .contains(it->second))
+						    .contains(it->second.get()))
 							continue;
-						selectedPoints.insert(it->second);
+						selectedPoints.insert(it->second
+								      .get());
 					} else
-						pivot = it->second;
+						pivot = it->second.get();
 
 					break;
 				} else break;
@@ -214,44 +301,52 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 			break;
 		}
 		case Mode::ADD: {
-			std::multimap<int, RPoint*> distances;
-			for (auto& point: *frames.at(frame)) {
-				selectPoint(distances, point);
-			}
+			std::unordered_set<RPoint*> emptyVisited;
+			std::multimap<int, std::shared_ptr<RPoint>> distances;
+			for (auto& point: frames.at(frame)->points)
+				selectPoint(distances, emptyVisited,
+					    point);
+			const std::deque<std::shared_ptr<RPoint>> noChildren = {};
 
 			if (distances.begin() != distances.end() &&
 			    distances.begin()->first < 25) {
 				if (firstPoint) {
 					distances.begin()->second->c.push_back(
-						{{}, firstPoint.value(),
-								distances.
-								begin()->second
-								});
+						std::make_shared<RPoint>(
+						noChildren, firstPoint.value(),
+						distances.begin()->second.get()
+						));
 
 					selectedPoint = nullptr;
 					firstPoint = std::nullopt;
 				} else if (selectedPoint) {
-					selectedPoint->c.push_back(
-						{{}, distances.begin()->
-								second->p,
-								selectedPoint});
+					distances.begin()->second->c.push_back(
+						selectedPoint
+						);
 					selectedPoint = nullptr;
 				} else
 					selectedPoint = distances.begin()->second;
 
 			} else {
 				if (firstPoint) {
-					frames.at(frame)->push_back(
-						{ {{{}, mouse}},
-								firstPoint.value(),
-								nullptr
-								});
+					const std::deque<std::shared_ptr<RPoint>> c = {
+						std::make_shared<RPoint>(
+							noChildren,
+							mouse, nullptr)};
+
+					frames.at(frame)->points.push_back(
+						std::make_shared<RPoint>(
+							c,
+							firstPoint.value(),
+							nullptr));
 					selectedPoint = nullptr;
 					firstPoint = std::nullopt;
 				} else if (selectedPoint) {
 					selectedPoint->c.push_back(
-						{{}, mouse,
-								selectedPoint});
+						std::make_shared<RPoint>(
+							noChildren,
+							mouse,
+							selectedPoint.get()));
 					selectedPoint = nullptr;
 				} else
 					firstPoint = mouse;
@@ -283,26 +378,27 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 		);
 
 	// Onion skins
-	for (int i = std::max(frame - 3, 0);
+	for (int i = std::max(static_cast<int>(frame - 3), 0);
 	     i < frame; i++) {
 		SDL_SetRenderDrawColor(renderer, 170, 100, 0,
 				       (3-(frame - i))*70
 			);
-		for (auto const& point : *frames.at(i))
-			drawLine(point);
+		for (auto const& point : frames.at(i)->points)
+			drawLine(*point);
 	}
-	for (int i = std::min(frame + 3, static_cast<int>(frames.size()) - 1);
+	for (int i = std::min(static_cast<int>(frame + 3),
+			      static_cast<int>(frames.size()) - 1);
 	     i > frame; i--) {
 		SDL_SetRenderDrawColor(renderer, 0, 100, 170,
 				       (3-(i - frame))*70
 			);
-		for (auto const& point : *frames.at(i))
-			drawLine(point);
+		for (auto const& point : frames.at(i)->points)
+			drawLine(*point);
 	}
 	// Actual frame
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-	for (auto const& point : *frames.at(frame))
-		drawLine(point);
+	for (auto const& point : frames.at(frame)->points)
+		drawLine(*point);
 
 	// Selected
 	SDL_SetRenderDrawColor(renderer, 255, 0, 0, 100);
@@ -333,8 +429,8 @@ void drawLine(const RPoint& p) {
 	for (auto& c : p.c) {
 		SDL_RenderLine(renderer,
 			       p.p.x, p.p.y,
-			       c.p.x, c.p.y);
-		drawLine(c);
+			       c->p.x, c->p.y);
+		drawLine(*c);
 	}
 };
 
@@ -358,8 +454,8 @@ void ExportAnimation()
 		SDL_RenderClear(renderer);
 		SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 
-		for (auto const& point : *f)
-			drawLine(point);
+		for (auto const& point : f->points)
+			drawLine(*point);
 		renderedFrames.push_back(SDL_RenderReadPixels(renderer, NULL));
 	}
 	SDL_DestroyTexture(temp);

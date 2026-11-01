@@ -19,10 +19,10 @@ Done:
 - Onion skins
 - Better selection
 - Connect lines at end
+- Delete lines
 
 Todo:
 - Delete frames
-- Delete lines
 - Undo (?)
 - Cycle selection
 - Circles (?)
