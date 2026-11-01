@@ -8,9 +8,10 @@ This program offers the bare minimum for making stick figure animations and
 exporting them as gifs. It's UX is far from something like Pivot, but it should
 suffice for extinguishing slight boredom.
 
-Here is a small animation that was made with this program:
+Here is a small animation that was made with this program (I am evidently not an animator):
 <img width="800" height="600" alt="out"
-src="https://github.com/user-attachments/assets/41435837-abe8-4ef4-bbc5-38be6354fd63"/>
+src="https://github.com/user-attachments/assets/3c1edd42-c3b0-4d9d-abcf-78d5fa8ac627" />
+
 
 Features:
 - Basic line and circle drawing
