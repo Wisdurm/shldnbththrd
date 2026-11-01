@@ -18,6 +18,7 @@
 #include <deque>
 #include <unordered_map>
 #include <unordered_set>
+#include <map>
 #include <memory>
 #include <vector>
 #include <string>
@@ -50,7 +51,7 @@ static std::unordered_map<Mode, std::string> modeNames = {
 	{ Mode::ROTATE,	"Rotate"},
 };
 
-using Frame = std::vector<RPoint>;
+using Frame = std::deque<RPoint>;
 
 void drawLine(const RPoint& p);
 void ExportAnimation();
@@ -75,10 +76,9 @@ static const RPoint* pivot;
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 {
-	if (!SDL_CreateWindowAndRenderer("Hello World",
+	if (!SDL_CreateWindowAndRenderer("shldnbththrd",
 					 800, 600,
-
-					 SDL_WINDOW_RESIZABLE,
+					 0,
 					 &window, &renderer)) {
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
@@ -92,14 +92,12 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 {
 	constexpr auto selectPoint = [&]
-		(this const auto &self, RPoint& p)
-		-> RPoint* {
-		if (Distance(p.p, mouse) < 25) {
-			return &p;
-		}
+		(this const auto &self,
+		 std::multimap<int, RPoint*>& distances,
+		 RPoint& p) -> void {
+		distances.insert({Distance(p.p, mouse), &p});
 		for (auto& c : p.c)
-			if (auto p = self(c)) return p;
-		return nullptr;
+			self(distances, c);
 	};
 
 	constexpr auto selectAll = [&]
@@ -148,6 +146,17 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 			}
 			break;
 		}
+		case SDLK_D: {
+			if (mode == Mode::SELECT) {
+				// Probably safe because unordered_sets are unordered?
+				for (auto& p : selectedPoints) {
+					if (auto par = p->parent) {
+					} else {
+					}
+				}
+			}
+			break;
+		}
 		case SDLK_S:
 			ExportAnimation();
 			break;
@@ -184,37 +193,68 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 		switch (mode)
 		{
 		case Mode::SELECT: {
+			std::multimap<int, RPoint*> distances;
 			for (auto& point: *frames.at(frame)) {
-				if (auto p = selectPoint(point)) {
-					if (event->button.button == SDL_BUTTON_LEFT)
-						selectedPoints.insert(p);
-					else
-						pivot = p;
-				}
+				selectPoint(distances, point);
+			}
+			for (auto it = distances.begin();
+			     it != distances.end(); it++) {
+				if (it->first < 25) {
+					if (event->button.button == SDL_BUTTON_LEFT) {
+						if (selectedPoints
+						    .contains(it->second))
+							continue;
+						selectedPoints.insert(it->second);
+					} else
+						pivot = it->second;
+
+					break;
+				} else break;
 			}
 			break;
 		}
 		case Mode::ADD: {
-			if (firstPoint) {
-				frames.at(frame)->push_back(
-					{ {{{}, mouse}},
-							firstPoint.value(),
-							nullptr
-							});
-				selectedPoint = nullptr;
-				firstPoint = std::nullopt;
-			} else if (selectedPoint) {
-				selectedPoint->c.push_back(
-					{{}, mouse, selectedPoint});
-				selectedPoint = nullptr;
+			std::multimap<int, RPoint*> distances;
+			for (auto& point: *frames.at(frame)) {
+				selectPoint(distances, point);
+			}
+
+			if (distances.begin() != distances.end() &&
+			    distances.begin()->first < 25) {
+				if (firstPoint) {
+					distances.begin()->second->c.push_back(
+						{{}, firstPoint.value(),
+								distances.
+								begin()->second
+								});
+
+					selectedPoint = nullptr;
+					firstPoint = std::nullopt;
+				} else if (selectedPoint) {
+					selectedPoint->c.push_back(
+						{{}, distances.begin()->
+								second->p,
+								selectedPoint});
+					selectedPoint = nullptr;
+				} else
+					selectedPoint = distances.begin()->second;
+
 			} else {
-				for (auto& point: *frames.at(frame)) {
-					if (auto p = selectPoint(point)) {
-						selectedPoint = p;
-						return SDL_APP_CONTINUE;
-					}
-				}
-				firstPoint = mouse;
+				if (firstPoint) {
+					frames.at(frame)->push_back(
+						{ {{{}, mouse}},
+								firstPoint.value(),
+								nullptr
+								});
+					selectedPoint = nullptr;
+					firstPoint = std::nullopt;
+				} else if (selectedPoint) {
+					selectedPoint->c.push_back(
+						{{}, mouse,
+								selectedPoint});
+					selectedPoint = nullptr;
+				} else
+					firstPoint = mouse;
 			}
 			break;
 		}
@@ -236,12 +276,31 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 	// Mode line
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_RenderDebugTextFormat(renderer, 0, 0,
-				  "%s mode - Frame: %d",
+				  "%s mode - Frame: %d / %zu",
 				  modeNames.at(mode).c_str(),
-				  frame
+				  frame,
+				  frames.size() - 1
 		);
 
-	// Frame
+	// Onion skins
+	for (int i = std::max(frame - 3, 0);
+	     i < frame; i++) {
+		SDL_SetRenderDrawColor(renderer, 170, 100, 0,
+				       (3-(frame - i))*70
+			);
+		for (auto const& point : *frames.at(i))
+			drawLine(point);
+	}
+	for (int i = std::min(frame + 3, static_cast<int>(frames.size()) - 1);
+	     i > frame; i--) {
+		SDL_SetRenderDrawColor(renderer, 0, 100, 170,
+				       (3-(i - frame))*70
+			);
+		for (auto const& point : *frames.at(i))
+			drawLine(point);
+	}
+	// Actual frame
+	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	for (auto const& point : *frames.at(frame))
 		drawLine(point);
 
