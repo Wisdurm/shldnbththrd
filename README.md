@@ -1,31 +1,32 @@
 # shldnbththrd
 
 **shldnbththrd** (I forgot a t) is a super simple modal vector animation program
-that was made in around 4 hours to prove it should not be that hard for someone
+that was made in 2 days to prove it should not be that hard for someone
 else to make a proper Pivot animator-like tool for Linux (without Claude :)).
 
-This program offers the bare minimum for making animations using just straight
-lines, with the most mindblowing, awe-inspiring feature being that you can
-rotate points around each other (Wow!).
+This program offers the bare minimum for making stick figure animations and
+exporting them as gifs. It's UX is far from something like Pivot, but it should
+suffice for extinguishing slight boredom.
 
 Here is a small animation that was made with this program:
 <img width="800" height="600" alt="out"
-src="https://github.com/user-attachments/assets/41435837-abe8-4ef4-bbc5-38be6354fd63"
-/>
+src="https://github.com/user-attachments/assets/41435837-abe8-4ef4-bbc5-38be6354fd63"/>
 
-May be updated in the future since making this was honestly pretty fun.
-
-Done:
+Features:
+- Basic line and circle drawing
+- Rotation around pivots
+- GIF export
 - Onion skins
-- Better selection
-- Connect lines at end
-- Delete lines
-- Delete frames
-- Circles
-- Thick lines
+- Similar UX to Vim and Emacs...
 
-Todo:
-- Better pivot markers
-- Undo (?)
-- Cycle selection (??)
+I currently consider this program done, and I probably won't update it except to
+make some bug fixes or quality of life changes. Who knows though, I might add
+some crazy new stuff.
+
+Possible features:
+- Preview of things to be drawn (quite easy)
+- Other export formats (super easy)
+- Better pivot markers (super easy)
+- Undo (probably quite hard?)
+- Cycle selection (annoying to implement??)
 - Slightly better ui (egads!!)

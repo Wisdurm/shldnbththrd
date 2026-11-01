@@ -153,6 +153,8 @@ constexpr float Distance(SDL_FPoint p1, SDL_FPoint p2);
 
 static SDL_Window *window = NULL;
 static SDL_Renderer *renderer = NULL;
+static SDL_Texture* circleTexture = nullptr;
+static SDL_Texture* stickTexture = nullptr;
 
 // Program
 
@@ -162,8 +164,7 @@ static Mode mode = Mode::SELECT;
 static std::vector<std::unique_ptr<Frame>> frames;
 static unsigned frame = 0;
 static SDL_FPoint mouse;
-static SDL_Texture* circleTexture = nullptr;
-static SDL_Texture* stickTexture = nullptr;
+static bool shiftDown;
 
 /// Mode data (if haskell could be in type :( sad)
 
@@ -237,21 +238,36 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 	if (event->type == SDL_EVENT_KEY_DOWN) {
 		switch (event->key.key)
 		{
+		case SDLK_RSHIFT: [[fallthrough]];
+		case SDLK_LSHIFT:
+			shiftDown = true;
+			break;
 		case SDLK_1:
 			mode = Mode::SELECT;
+
 			selectedPoints.clear();
 			pivot = nullptr;
+			firstPoint = std::nullopt;
+			selectedPoint = nullptr;
 			break;
 		case SDLK_2:
 			mode = Mode::ADD;
+
+			selectedPoint = nullptr;
 			firstPoint = std::nullopt;
 			break;
 		case SDLK_3:
 			mode = Mode::MOVE;
+
+			selectedPoint = nullptr;
+			firstPoint = std::nullopt;
 			break;
 		case SDLK_4:
-			if (pivot)
+			if (pivot) {
 				mode = Mode::ROTATE;
+				firstPoint = std::nullopt;
+				selectedPoint = nullptr;
+			}
 			break;
 		case SDLK_Z:
 			lineType = LineType::STICK;
@@ -328,6 +344,14 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 		}
 		case SDLK_S:
 			ExportAnimation();
+			break;
+		}
+	} else if (event->type == SDL_EVENT_KEY_UP) {
+		switch (event->key.key)
+		{
+		case SDLK_RSHIFT: [[fallthrough]];
+		case SDLK_LSHIFT:
+			shiftDown = false;
 			break;
 		}
 	} else if (event->type == SDL_EVENT_MOUSE_MOTION) {
@@ -414,10 +438,24 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 
 			} else {
 				if (firstPoint) {
+					SDL_FPoint pos = mouse;
+					if (shiftDown) {
+						const float xDif =
+							std::abs(firstPoint.value().x
+								 - mouse.x);
+						const float yDif =
+							std::abs(firstPoint.value().y
+								 - mouse.y);
+						if (xDif < yDif)
+							pos.x = firstPoint.value().x;
+						else
+							pos.y = firstPoint.value().y;
+					}
+
 					const std::vector<DrawnLine> c
 						= { {std::make_shared<RPoint>(
 								noChildren,
-								mouse, nullptr),
+								pos, nullptr),
 							     lineType}};
 
 					frames.at(frame)->points.push_back(
@@ -428,10 +466,24 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 					selectedPoint = nullptr;
 					firstPoint = std::nullopt;
 				} else if (selectedPoint) {
+					SDL_FPoint pos = mouse;
+					if (shiftDown) {
+						const float xDif =
+							std::abs(selectedPoint->p.x
+								 - mouse.x);
+						const float yDif =
+							std::abs(selectedPoint->p.y
+								 - mouse.y);
+						if (xDif < yDif)
+							pos.x = selectedPoint->p.x;
+						else
+							pos.y = selectedPoint->p.y;
+					}
+
 					selectedPoint->c.push_back({
 							std::make_shared<RPoint>(
 								noChildren,
-								mouse,
+								pos,
 								selectedPoint.get()),
 							lineType});
 					selectedPoint = nullptr;
@@ -467,12 +519,13 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 	}
 	SDL_RenderDebugTextFormat(renderer, 0, 0,
 				  "%s mode - Drawing %s - Frame: %d / %zu"
-				  " - Lines: %zu",
+				  " - Lines: %zu - Selected: %zu",
 				  modeNames.at(mode).c_str(),
 				  lineNames.at(lineType).c_str(),
 				  frame,
 				  frames.size() - 1,
-				  sum
+				  sum,
+				  selectedPoints.size()
 		);
 
 	// Onion skins
@@ -480,9 +533,9 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 	     i < frame; i++) {
 		const uint8_t a = (i - frame)*70;
 		SDL_SetRenderDrawColor(renderer, 170, 100, 0, a);
-		SDL_SetTextureColorMod(circleTexture, 0, 170, 100);
+		SDL_SetTextureColorMod(circleTexture, 170, 100, 0);
 		SDL_SetTextureAlphaMod(circleTexture, a);
-		SDL_SetTextureColorMod(stickTexture, 0, 170, 100);
+		SDL_SetTextureColorMod(stickTexture,  170, 100, 0);
 		SDL_SetTextureAlphaMod(stickTexture, a);
 		for (auto const& point : frames.at(i)->points)
 			drawLine(point.get());
@@ -499,6 +552,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 		for (auto const& point : frames.at(i)->points)
 			drawLine(point.get());
 	}
+
 	// Actual frame
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_SetTextureColorMod(circleTexture, 0, 0, 0);
@@ -509,30 +563,48 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 		drawLine(point.get());
 
 	// Selected
-	SDL_SetRenderDrawColor(renderer, 255, 0, 0, 100);
-	for (const auto& p : selectedPoints) {
+	if (mode != Mode::ADD) {
+		SDL_SetRenderDrawColor(renderer, 255, 0, 0, 100);
+		for (const auto& p : selectedPoints) {
+			const SDL_FRect rect = {
+				p->p.x - ((CAP_SIZE + 10) / 2),
+				p->p.y - ((CAP_SIZE + 10) / 2),
+				CAP_SIZE + 10, CAP_SIZE + 10
+			};
+			SDL_SetTextureColorMod(circleTexture, 255, 0, 0);
+			SDL_SetTextureAlphaMod(circleTexture, 150);
+			SDL_RenderTexture(renderer, circleTexture,
+					  nullptr, &rect);
+
+		}
+		if (pivot) {
+			SDL_SetTextureColorMod(circleTexture,
+					       170, 100, 0);
+			SDL_SetTextureAlphaMod(circleTexture, 150);
+			const SDL_FRect rect = {
+				pivot->p.x - ((CAP_SIZE + 20) / 2),
+				pivot->p.y - ((CAP_SIZE + 20) / 2),
+				CAP_SIZE + 20, CAP_SIZE + 20
+			};
+			SDL_RenderTexture(renderer, circleTexture,
+					  nullptr, &rect);
+		}
+	}
+	// Preview
+	if (firstPoint || selectedPoint) {
+		const SDL_FPoint p = firstPoint.value_or(selectedPoint->p);
+
 		const SDL_FRect rect = {
-			p->p.x - ((CAP_SIZE + 10) / 2),
-			p->p.y - ((CAP_SIZE + 10) / 2),
+			p.x - ((CAP_SIZE + 10) / 2),
+			p.y - ((CAP_SIZE + 10) / 2),
 			CAP_SIZE + 10, CAP_SIZE + 10
 		};
-		SDL_SetTextureColorMod(circleTexture, 255, 0, 0);
+		SDL_SetTextureColorMod(circleTexture, 100, 100, 255);
 		SDL_SetTextureAlphaMod(circleTexture, 150);
 		SDL_RenderTexture(renderer, circleTexture,
 				  nullptr, &rect);
+	}
 
-	}
-	if (pivot) {
-		SDL_SetTextureColorMod(circleTexture, 170, 100, 0);
-		SDL_SetTextureAlphaMod(circleTexture, 150);
-		const SDL_FRect rect = {
-			pivot->p.x - ((CAP_SIZE + 20) / 2),
-			pivot->p.y - ((CAP_SIZE + 20) / 2),
-			CAP_SIZE + 20, CAP_SIZE + 20
-		};
-		SDL_RenderTexture(renderer, circleTexture,
-				  nullptr, &rect);
-	}
 	SDL_RenderPresent(renderer);
 	return SDL_APP_CONTINUE;
 }
