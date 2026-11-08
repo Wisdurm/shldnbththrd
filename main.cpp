@@ -340,6 +340,10 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 				frames.erase(frames.begin() + frame);
 				frame = std::max(static_cast<int>(frame - 1), 0);
 			}
+			selectedPoints.clear();
+			pivot = nullptr;
+			firstPoint = std::nullopt;
+			selectedPoint = nullptr;
 			break;
 		}
 		case SDLK_S:
