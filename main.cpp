@@ -140,10 +140,13 @@ static const std::unordered_map<LineType, std::string> lineNames = {
 };
 
 constexpr float CAP_SIZE = 10;
+// Todo: not constant
+constexpr int WIDTH = 800;
+constexpr int HEIGHT = 600;
 
 // Functions
 
-void drawLine(const RPoint* p);
+void drawLine(const RPoint* p, bool offset);
 void ExportAnimation();
 void LoadSVG(SDL_Texture*& dst, const std::string& svg, int w, int h);
 size_t countLines(RPoint* p, std::unordered_set<RPoint*>& visited);
@@ -165,6 +168,9 @@ static std::vector<std::unique_ptr<Frame>> frames;
 static unsigned frame = 0;
 static SDL_FPoint mouse;
 static bool shiftDown;
+// Offset all points by this
+static float xOffset = 0;
+static float yOffset = 0;
 
 /// Mode data (if haskell could be in type :( sad)
 
@@ -182,8 +188,8 @@ static const RPoint* pivot;
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 {
 	if (!SDL_CreateWindowAndRenderer("shldnbththrd",
-					 800, 600,
-					 0,
+					 WIDTH, HEIGHT,
+					 SDL_WINDOW_RESIZABLE,
 					 &window, &renderer)) {
 		SDL_Log("Couldn't create window and renderer: %s", SDL_GetError());
 		return SDL_APP_FAILURE;
@@ -359,7 +365,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 			break;
 		}
 	} else if (event->type == SDL_EVENT_MOUSE_MOTION) {
-		mouse = {event->motion.x, event->motion.y };
+		mouse = {event->motion.x - xOffset, event->motion.y - yOffset};
 		switch (mode) {
 		case Mode::MOVE: {
 			for (auto p : selectedPoints) {
@@ -510,9 +516,20 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 {
 	SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
 	SDL_RenderClear(renderer);
+	int screenWidth, screenHeight;
+	SDL_GetCurrentRenderOutputSize(renderer, &screenWidth, &screenHeight);
+	xOffset = (screenWidth - WIDTH) / 2.f;
+	yOffset = (screenHeight - HEIGHT) / 2.f;
+
+	// Output size rect
+	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+	const SDL_FRect boundsrect = {
+		xOffset, yOffset,
+		WIDTH, HEIGHT
+	};
+	SDL_RenderRect(renderer, &boundsrect);
 
 	// Mode line
-	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	size_t sum = 0;
 	{
 		std::unordered_set<RPoint*> visited;
@@ -542,7 +559,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 		SDL_SetTextureColorMod(stickTexture,  170, 100, 0);
 		SDL_SetTextureAlphaMod(stickTexture, a);
 		for (auto const& point : frames.at(i)->points)
-			drawLine(point.get());
+			drawLine(point.get(), true);
 	}
 	for (int i = std::min(static_cast<int>(frame + 3),
 			      static_cast<int>(frames.size()) - 1);
@@ -554,7 +571,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 		SDL_SetTextureColorMod(stickTexture, 0, 100, 170);
 		SDL_SetTextureAlphaMod(stickTexture, a);
 		for (auto const& point : frames.at(i)->points)
-			drawLine(point.get());
+			drawLine(point.get(), true);
 	}
 
 	// Actual frame
@@ -564,15 +581,15 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 	SDL_SetTextureColorMod(stickTexture, 0, 0, 0);
 	SDL_SetTextureAlphaMod(stickTexture, 255);
 	for (auto const& point : frames.at(frame)->points)
-		drawLine(point.get());
+		drawLine(point.get(), true);
 
 	// Selected
 	if (mode != Mode::ADD) {
 		SDL_SetRenderDrawColor(renderer, 255, 0, 0, 100);
 		for (const auto& p : selectedPoints) {
 			const SDL_FRect rect = {
-				p->p.x - ((CAP_SIZE + 10) / 2),
-				p->p.y - ((CAP_SIZE + 10) / 2),
+				p->p.x - ((CAP_SIZE + 10) / 2) + xOffset,
+				p->p.y - ((CAP_SIZE + 10) / 2) + yOffset,
 				CAP_SIZE + 10, CAP_SIZE + 10
 			};
 			SDL_SetTextureColorMod(circleTexture, 255, 0, 0);
@@ -586,8 +603,8 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 					       170, 100, 0);
 			SDL_SetTextureAlphaMod(circleTexture, 150);
 			const SDL_FRect rect = {
-				pivot->p.x - ((CAP_SIZE + 20) / 2),
-				pivot->p.y - ((CAP_SIZE + 20) / 2),
+				pivot->p.x - ((CAP_SIZE + 20) / 2) + xOffset,
+				pivot->p.y - ((CAP_SIZE + 20) / 2) + yOffset,
 				CAP_SIZE + 20, CAP_SIZE + 20
 			};
 			SDL_RenderTexture(renderer, circleTexture,
@@ -599,8 +616,8 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 		const SDL_FPoint p = firstPoint.value_or(selectedPoint->p);
 
 		const SDL_FRect rect = {
-			p.x - ((CAP_SIZE + 10) / 2),
-			p.y - ((CAP_SIZE + 10) / 2),
+			p.x - ((CAP_SIZE + 10) / 2) + xOffset,
+			p.y - ((CAP_SIZE + 10) / 2) + yOffset,
 			CAP_SIZE + 10, CAP_SIZE + 10
 		};
 		SDL_SetTextureColorMod(circleTexture, 100, 100, 255);
@@ -616,29 +633,38 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 void SDL_AppQuit(void *appstate, SDL_AppResult result)
 {}
 
-void drawLine_(const RPoint* p, std::unordered_set<Line>& visited)
+void drawLine_(const RPoint* p, std::unordered_set<Line>& visited, bool offset)
 {
+	constexpr auto offsetPoint = [&](SDL_FPoint rect)
+		-> SDL_FPoint {
+		return {rect.x + xOffset,
+			rect.y + yOffset};
+	};
+
 	for (auto& [c, lt] : p->c) {
 		const Line pair = {p, c.get()};
 		if (visited.contains(pair))
 			continue;
 		visited.insert(pair);
 
+		const SDL_FPoint f = offset ? offsetPoint(p->p) : p->p;
+		const SDL_FPoint s = offset ? offsetPoint(c->p) : c->p;
+
 		switch (lt)
 		{
 		case LineType::LINE:
 			SDL_RenderLine(renderer,
-				       p->p.x, p->p.y,
-				       c->p.x, c->p.y);
+				       f.x, f.y,
+				       s.x, s.y);
 			break;
 		case LineType::CIRCLE: {
 			// 7th grade level maths :shout: :fire:
-			const float w = c->p.x - p->p.x;
-			const float h = p->p.y - c->p.y;
+			const float w = s.x - f.x;
+			const float h = f.y - s.y;
 			const float hyp = std::sqrt(std::pow(h, 2)
 						    + std::pow(w, 2));
 			const SDL_FRect dstrect = {
-				p->p.x - (hyp/2), p->p.y-hyp,
+				f.x - (hyp/2), f.y-hyp,
 				hyp, hyp
 			};
 
@@ -654,8 +680,8 @@ void drawLine_(const RPoint* p, std::unordered_set<Line>& visited)
 			break;
 		}
 		case LineType::STICK: {
-			const float w = c->p.x - p->p.x;
-			const float h = p->p.y - c->p.y;
+			const float w = s.x - f.x;
+			const float h = f.y - s.y;
 			const float hyp = std::sqrt(std::pow(h, 2)
 						    + std::pow(w, 2));
 			const double angle = std::asin(h/hyp);
@@ -669,8 +695,8 @@ void drawLine_(const RPoint* p, std::unordered_set<Line>& visited)
 					0,100, 200, 300
 				};
 				const SDL_FRect dstrect = {
-					p->p.x - (CAP_SIZE/2),
-					p->p.y-hyp,
+					f.x - (CAP_SIZE/2),
+					f.y-hyp,
 					CAP_SIZE, hyp
 				};
 				const SDL_FPoint center = {
@@ -687,8 +713,8 @@ void drawLine_(const RPoint* p, std::unordered_set<Line>& visited)
 			// Caps
 			{
 				const SDL_FRect dstrect = {
-					p->p.x - CAP_SIZE / 2,
-					p->p.y - CAP_SIZE / 2,
+					f.x - CAP_SIZE / 2,
+					f.y - CAP_SIZE / 2,
 					CAP_SIZE, CAP_SIZE
 				};
 				SDL_RenderTexture(renderer,
@@ -697,9 +723,9 @@ void drawLine_(const RPoint* p, std::unordered_set<Line>& visited)
 						  &dstrect);
 			}
 			{
-				const float destX = p->p.x +
+				const float destX = f.x +
 					(std::cos(rangle-(M_PI/2))*hyp);
-				const float destY = p->p.y +
+				const float destY = f.y +
 					(std::sin(rangle-(M_PI/2))*hyp);
 				const SDL_FRect dstrect = {
 					destX - CAP_SIZE / 2,
@@ -714,14 +740,14 @@ void drawLine_(const RPoint* p, std::unordered_set<Line>& visited)
 			break;
 		}
 		}
-		drawLine_(c.get(), visited);
+		drawLine_(c.get(), visited, offset);
 	}
 };
 
-void drawLine(const RPoint* p)
+void drawLine(const RPoint* p, bool offset)
 {
 	std::unordered_set<Line> visited;
-	drawLine_(p, visited);
+	drawLine_(p, visited, offset);
 }
 
 void ExportAnimation()
@@ -735,7 +761,7 @@ void ExportAnimation()
 	SDL_Texture* temp = SDL_CreateTexture(renderer,
 					      SDL_PIXELFORMAT_RGBA8888,
 					      SDL_TEXTUREACCESS_TARGET,
-					      800, 600);
+					      WIDTH, HEIGHT);
 	SDL_SetRenderTarget(renderer, temp);
 
 	// Draw frames
@@ -745,7 +771,7 @@ void ExportAnimation()
 		SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 
 		for (auto const& point : f->points)
-			drawLine(point.get());
+			drawLine(point.get(), false);
 		renderedFrames.push_back(SDL_RenderReadPixels(renderer, NULL));
 	}
 	SDL_DestroyTexture(temp);
@@ -753,7 +779,7 @@ void ExportAnimation()
 	// Export
 
 	IMG_Animation vid = {
-		800, 600,
+		WIDTH, HEIGHT,
 		static_cast<int>(frames.size()),
 		renderedFrames.data(),
 		lens.data()
