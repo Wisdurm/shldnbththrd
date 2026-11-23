@@ -147,7 +147,7 @@ constexpr int HEIGHT = 600;
 // Functions
 
 void drawLine(const RPoint* p, bool offset);
-void ExportAnimation();
+void ExportAnimation(const std::string& path);
 void LoadSVG(SDL_Texture*& dst, const std::string& svg, int w, int h);
 size_t countLines(RPoint* p, std::unordered_set<RPoint*>& visited);
 constexpr float Distance(SDL_FPoint p1, SDL_FPoint p2);
@@ -353,7 +353,7 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
 			break;
 		}
 		case SDLK_S:
-			ExportAnimation();
+			ExportAnimation("./out.gif");
 			break;
 		}
 	} else if (event->type == SDL_EVENT_KEY_UP) {
@@ -631,7 +631,10 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 }
 
 void SDL_AppQuit(void *appstate, SDL_AppResult result)
-{}
+{
+	// Backup
+	ExportAnimation("/tmp/out.gif");
+}
 
 void drawLine_(const RPoint* p, std::unordered_set<Line>& visited, bool offset)
 {
@@ -750,7 +753,7 @@ void drawLine(const RPoint* p, bool offset)
 	drawLine_(p, visited, offset);
 }
 
-void ExportAnimation()
+void ExportAnimation(const std::string& path)
 {
 	std::vector<int> lens;
 	for (int i = 0; i < frames.size(); i++) { lens.push_back(100); };
@@ -784,7 +787,7 @@ void ExportAnimation()
 		renderedFrames.data(),
 		lens.data()
 	};
-	IMG_SaveAnimation(&vid, "./out.gif");
+	IMG_SaveAnimation(&vid, path.c_str());
 
 	// Cleanup
 	for (auto& s : renderedFrames)
